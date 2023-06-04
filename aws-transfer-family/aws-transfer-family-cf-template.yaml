@@ -1,0 +1,150 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: creates SFTP Server
+
+Parameters:
+  s3bucketName:
+    Type: String
+
+Resources:
+  MyTransferServer:
+    Type : AWS::Transfer::Server
+    Properties :
+      EndpointType: PUBLIC
+      LoggingRole: !GetAtt TransferFamilyLoggingRole.Arn
+      Protocols:
+          - SFTP
+      SecurityPolicyName: "TransferSecurityPolicy-2018-11"
+      IdentityProviderDetails:
+          Function: !GetAtt IdPLambdaFunction.Arn
+      IdentityProviderType: AWS_LAMBDA
+      Tags:
+        - Key: KeyName
+          Value: ValueName
+
+  TransferFamilyLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - transfer.amazonaws.com
+      ManagedPolicyArns:
+         - arn:aws:iam::aws:policy/service-role/AWSTransferLoggingAccess
+
+  IdPLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: transfer-family-authn-lambda
+      Description: This is an example of an AWS Transfer Family authorizer function
+      Role: !GetAtt IdPLambdaIAMRole.Arn
+      Code:
+        ZipFile: |
+          import os
+          
+          bucket_name = os.environ['S3_BUCKET_NAME']
+          access_role = os.environ['S3_ACCESS_ROLE']
+          required_param_list = ["serverId", "username", "protocol", "sourceIp"]
+          
+          
+          def validate_input(event):
+              # Validate AWS Transfer input parameters:
+              for parameter in required_param_list:
+                  if parameter not in event:
+                      raise Exception("Incoming " + parameter + " missing - Unexpected")
+                      
+          def is_authenticated(username, password) -> bool:
+              #
+              # implement IdP Logic here
+              #
+              # we return true for demo purposes
+              return True
+              
+              
+          def lambda_handler(event, context):
+              
+              validate_input(event)
+          
+              # Parse user authentication input  
+              input_username = event["username"]
+              input_password = event.get("password", "")
+          
+              # building user response for an authticated user 
+              # in this demo we set a home directory per user name
+              if is_authenticated(input_username, input_password):
+                  response_data = {}
+                  input_protocol = event["protocol"]
+                  input_sourceIp = event["sourceIp"]
+                  input_serverId = event["serverId"]
+                  response_data["Role"] = access_role
+                  response_data["Policy"] = '{"Version":"2012-10-17","Statement":[{"Sid":"AllowListingOfUserFolder","Action":["s3:List*"],"Effect":"Allow","Resource":["*"]},{"Sid":"HomeDirObjectAccess","Effect":"Allow","Action":["s3:PutObject","s3:GetObject","s3:DeleteObject","s3:GetObjectVersion"],"Resource":"arn:aws:s3:::*"}]}'
+                  print(response_data["Policy"])
+                  
+                  print(bucket_name)
+                  response_data["HomeDirectory"] = f'/{bucket_name}/{input_username}'
+              
+                  return response_data
+
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Runtime: python3.9
+      Environment:
+        Variables:
+          S3_BUCKET_NAME: !Ref s3bucketName
+          S3_ACCESS_ROLE: !GetAtt S3AccessRole.Arn
+    DependsOn:
+      - IdPLambdaIAMRole
+
+  IdPLambdaIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      ManagedPolicyArns:
+         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+         - arn:aws:iam::aws:policy/service-role/AWSLambdaRole
+
+  IdPLambdaPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+      - IdPLambdaFunction
+    Properties:
+      FunctionName: !Ref IdPLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: transfer.amazonaws.com
+
+  S3AccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - transfer.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+#      Policies:
+#        - PolicyName: S3AccessPolicy
+#          PolicyDocument:
+#            Version: '2012-10-17'
+#            Statement:
+#              - Effect: Allow
+#                Action:
+#                  - s3:*
+#                Resource:
+#                  - !Join [ ":", [ "arn:aws:s3::", !Ref s3bucketName, "/*" ] ]
